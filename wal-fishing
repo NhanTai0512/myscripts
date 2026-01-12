@@ -1,0 +1,406 @@
+-- Complete Auto Fishing Bot (Remote Sell Fix - Hold F Support)
+-- Fixes: Infinite Range, Auto 'F' Hold for 2s, Event-Based Bite
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local character = player.Character or player.CharacterAdded:Wait()
+local backpack = player:WaitForChild("Backpack")
+
+-- ============================================
+-- CONFIGURATION
+-- ============================================
+local CONFIG = {
+    AUTO_CAST = false,
+    AUTO_LURE = false,
+    AUTO_HOOK = false,
+    AUTO_NAVIGATE = false,
+    AUTO_REEL = false,
+    AUTO_SELL = true,            
+    
+    LURE_INTERVAL = 3,           -- Your config (3s)
+    CENTER_THRESHOLD = 0.15,
+}
+
+local FISH_SELL_LIST = {
+   ["Goby"] = true,
+    ["Carp"] = true,
+    ["Perch"] = true,
+    ["Tench"] = true,
+    ["Bream"] = true,
+    ["Twig"] = true,
+    ["Boot"] = true
+}
+
+-- State
+local minigameActive = false
+local minigameGui = nil
+local navigationCoroutine = nil
+local lureConnection = nil
+local biteConnection = nil
+local lastLureTime = 0
+local fishingCycle = "idle"
+
+print("[AutoFish] Loaded: Remote Auto-Sell (Hold F Fix) enabled.")
+
+-- ============================================
+-- 1. UTILS
+-- ============================================
+local function releaseWASD()
+    local keys = {Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D}
+    for _, key in ipairs(keys) do
+        VirtualInputManager:SendKeyEvent(false, key, false, game)
+    end
+end
+
+local function getRod()
+    local rod = character:FindFirstChild("Fishing Rod")
+    if not rod then rod = backpack:FindFirstChild("Fishing Rod") end
+    return rod
+end
+
+-- ============================================
+-- 2. CASTING
+-- ============================================
+local function castRod()
+    if not CONFIG.AUTO_CAST then return end
+    
+    local rod = getRod()
+    if not rod then return end
+
+    fishingCycle = "casting"
+    
+    local humanoid = character:FindFirstChild("Humanoid")
+    if rod.Parent ~= character and humanoid then
+        humanoid:EquipTool(rod)
+        task.wait(0.5)
+    end
+    
+    setupBiteListener(rod)
+    
+    rod:Activate()
+    task.wait(0.1)
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+    task.wait(2)
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    
+    fishingCycle = "waiting"
+    lastLureTime = tick()
+    startLuringLoop()
+end
+
+-- ============================================
+-- 3. EVENT LISTENER (BITE)
+-- ============================================
+function setupBiteListener(rod)
+    if biteConnection then biteConnection:Disconnect() biteConnection = nil end
+    
+    local event = rod:FindFirstChild("ClassEvent")
+    local func = rod:FindFirstChild("ClassFunction")
+    
+    if event then
+        biteConnection = event.OnClientEvent:Connect(function(data)
+            if data and type(data) == "table" and data.type == "BITE" then
+                if CONFIG.AUTO_HOOK and fishingCycle == "waiting" then
+                    print("[AutoFish] ⚡ BITE DETECTED!")
+                    performInstantHook(rod, func)
+                end
+            end
+        end)
+    end
+end
+
+-- ============================================
+-- 4. INSTANT HOOK
+-- ============================================
+function performInstantHook(rod, remoteFunc)
+    stopLuring()
+    fishingCycle = "hooked"
+    
+    task.spawn(function()
+        if remoteFunc then remoteFunc:InvokeServer({type = "SET_HOOK"}) end
+        if rod then rod:Activate() end
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+    end)
+end
+
+-- ============================================
+-- 5. LURING
+-- ============================================
+function startLuringLoop()
+    if lureConnection then lureConnection:Disconnect() end
+    
+    lureConnection = RunService.RenderStepped:Connect(function()
+        if not CONFIG.AUTO_LURE or minigameActive or fishingCycle ~= "waiting" then return end
+        
+        if tick() - lastLureTime >= CONFIG.LURE_INTERVAL then
+            local rod = getRod()
+            if rod and rod.Parent == character then
+                rod:Activate()
+                lastLureTime = tick()
+            end
+        end
+    end)
+end
+
+function stopLuring()
+    if lureConnection then lureConnection:Disconnect() lureConnection = nil end
+    if biteConnection then biteConnection:Disconnect() biteConnection = nil end
+end
+
+-- ============================================
+-- 6. REMOTE SELL LOGIC (UPDATED: HOLD F)
+-- ============================================
+local function customFirePrompt(prompt)
+    if not prompt then return end
+
+    task.wait(0.1)
+    
+    -- 2. Fallback: Simulate Holding 'F' (For 2s Duration)
+    -- We use VirtualInputManager to mimic a real key press
+
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+    task.wait(3)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+end
+
+local function performSellSequence()
+    if not CONFIG.AUTO_SELL then return end
+
+    -- 1. Find Prompt
+    local pond = workspace:FindFirstChild("Pond")
+    local sellPart = pond and pond:FindFirstChild("Sell") and pond.Sell:FindFirstChild("PromptPart")
+    local prompt = sellPart and sellPart:FindFirstChild("SellItemPrompt")
+
+    if not prompt then
+        warn("[AutoFish] Sell Prompt NOT FOUND!")
+        return
+    end
+
+    print("[AutoFish] 💰 Selling fish...")
+    local humanoid = character:FindFirstChild("Humanoid")
+    if not humanoid then return end
+
+    -- 2. Identify fish
+    local toolsToSell = {}
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") and FISH_SELL_LIST[tool.Name] then
+            table.insert(toolsToSell, tool)
+        end
+    end
+
+    if #toolsToSell == 0 then return end
+
+    -- 3. Loop: Equip -> Hack Prompt -> Sell
+    for _, tool in ipairs(toolsToSell) do
+        if tool.Parent == backpack then
+            humanoid:EquipTool(tool)
+            task.wait(0.35) -- Equip delay
+            
+            customFirePrompt(prompt)
+            print("[AutoFish] Sold: " .. tool.Name)
+            
+            task.wait(0.25) 
+        end
+    end
+    
+    -- 4. Unequip
+    humanoid:UnequipTools()
+    task.wait(0.2)
+end
+
+-- ============================================
+-- 7. RESTART LOGIC
+-- ============================================
+local function performRestart()
+    if not CONFIG.AUTO_CAST then return end
+    
+    fishingCycle = "restarting"
+    
+    -- 1. Unequip Rod
+    local humanoid = character:FindFirstChild("Humanoid")
+    if humanoid then humanoid:UnequipTools() end
+    
+    task.wait(1.2)
+    
+    -- 2. Sell
+    performSellSequence()
+    
+    -- 3. Equip Rod
+    local rod = backpack:FindFirstChild("Fishing Rod")
+    if rod and humanoid then humanoid:EquipTool(rod) end
+    
+    task.wait(1.0)
+    castRod()
+end
+
+-- ============================================
+-- 8. MINIGAME LOGIC
+-- ============================================
+local function getGuiObjects(gui)
+    local outer = gui:FindFirstChild("OuterRing", true)
+    local inner = outer and outer:FindFirstChild("InnerRing")
+    local target = outer and outer:FindFirstChild("Target")
+    return outer, inner, target
+end
+
+local function clickMouseVirtual()
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+    task.wait(0.05)
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+end
+
+local function startMinigameNavigation(gui)
+    fishingCycle = "minigame"
+    navigationCoroutine = task.spawn(function()
+        while minigameActive and gui.Parent do
+            if CONFIG.AUTO_NAVIGATE then
+                local outer, inner, target = getGuiObjects(gui)
+                if inner and target then
+                    local tPos = target.Position
+                    local iPos = inner.Position
+                    local tx, ty = tPos.X.Scale, tPos.Y.Scale
+                    local ix, iy = iPos.X.Scale, iPos.Y.Scale
+                    local dist = math.sqrt((tx - ix)^2 + (ty - iy)^2)
+                    
+                    if (ix - tx) > 0.05 then VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.D, false, game) 
+                    else VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game) end
+                    
+                    if (ix - tx) < -0.05 then VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.A, false, game) 
+                    else VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.A, false, game) end
+                    
+                    if (iy - ty) > 0.05 then VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.S, false, game) 
+                    else VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.S, false, game) end
+                    
+                    if (iy - ty) < -0.05 then VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.W, false, game) 
+                    else VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W, false, game) end
+                    
+                    if dist < CONFIG.CENTER_THRESHOLD and CONFIG.AUTO_REEL then
+                        clickMouseVirtual()
+                        task.wait(0.1)
+                    end
+                end
+            end
+            task.wait()
+        end
+        releaseWASD()
+    end)
+end
+
+-- ============================================
+-- 9. MONITORING
+-- ============================================
+local function setupMonitoring()
+    playerGui.ChildAdded:Connect(function(child)
+        if child.Name == "FishMinigame" then
+            minigameActive = true
+            minigameGui = child
+            stopLuring()
+            startMinigameNavigation(child)
+        end
+    end)
+    
+    playerGui.ChildRemoved:Connect(function(child)
+        if child == minigameGui then
+            minigameActive = false
+            minigameGui = nil
+            if navigationCoroutine then task.cancel(navigationCoroutine) end
+            
+            releaseWASD()
+            task.spawn(performRestart)
+        end
+    end)
+end
+
+-- ============================================
+-- 10. UI
+-- ============================================
+local function loadFishNames()
+    local folder = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("Fish")
+    if folder then
+        for _, fish in ipairs(folder:GetChildren()) do
+            if fish:IsA("Model") and FISH_SELL_LIST[fish.Name] == nil then
+                FISH_SELL_LIST[fish.Name] = false
+            end
+        end
+    end
+end
+
+local function createUI()
+    loadFishNames()
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "AutoFish_RemoteSell"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+    
+    local frame = Instance.new("Frame", screenGui)
+    frame.Size = UDim2.new(0, 220, 0, 300) 
+    frame.Position = UDim2.new(0.02, 0, 0.4, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    
+    local title = Instance.new("TextLabel", frame)
+    title.Size = UDim2.new(1,0,0,30)
+    title.Text = "🎣 FastFish (Remote Sell)"
+    title.TextColor3 = Color3.new(1,1,1)
+    title.BackgroundColor3 = Color3.fromRGB(45,45,45)
+
+    local btn = Instance.new("TextButton", frame)
+    btn.Size = UDim2.new(0.9, 0, 0.15, 0)
+    btn.Position = UDim2.new(0.05, 0, 0.12, 0)
+    btn.Text = "START"
+    btn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+    
+    btn.MouseButton1Click:Connect(function()
+        CONFIG.AUTO_CAST = not CONFIG.AUTO_CAST
+        CONFIG.AUTO_LURE = CONFIG.AUTO_CAST
+        CONFIG.AUTO_HOOK = CONFIG.AUTO_CAST
+        CONFIG.AUTO_NAVIGATE = CONFIG.AUTO_CAST
+        CONFIG.AUTO_REEL = CONFIG.AUTO_CAST
+        
+        if CONFIG.AUTO_CAST then
+            btn.Text = "STOP"
+            btn.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+            task.spawn(performRestart)
+        else
+            btn.Text = "START"
+            btn.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+            stopLuring()
+            releaseWASD()
+            fishingCycle = "idle"
+        end
+    end)
+    
+    local scroll = Instance.new("ScrollingFrame", frame)
+    scroll.Size = UDim2.new(0.9, 0, 0.6, 0)
+    scroll.Position = UDim2.new(0.05, 0, 0.38, 0)
+    scroll.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    
+    local layout = Instance.new("UIListLayout", scroll)
+    layout.Padding = UDim.new(0,2)
+    
+    for name, _ in pairs(FISH_SELL_LIST) do
+        local itemBtn = Instance.new("TextButton", scroll)
+        itemBtn.Size = UDim2.new(1, 0, 0, 25)
+        itemBtn.Text = name
+        itemBtn.BackgroundColor3 = FISH_SELL_LIST[name] and Color3.fromRGB(0,100,0) or Color3.fromRGB(60,60,60)
+        itemBtn.TextColor3 = Color3.new(1,1,1)
+        
+        itemBtn.MouseButton1Click:Connect(function()
+            FISH_SELL_LIST[name] = not FISH_SELL_LIST[name]
+            itemBtn.BackgroundColor3 = FISH_SELL_LIST[name] and Color3.fromRGB(0,100,0) or Color3.fromRGB(60,60,60)
+        end)
+    end
+    
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        scroll.CanvasSize = UDim2.new(0,0,0, layout.AbsoluteContentSize.Y + 50)
+    end)
+end
+
+setupMonitoring()
+createUI()
