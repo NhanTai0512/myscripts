@@ -1,0 +1,25 @@
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+-- Variable to track if we are currently locked or not
+local isLocked = true
+
+-- Detect when you press the "Left Alt" key
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if input.KeyCode == Enum.KeyCode.LeftAlt then
+        isLocked = not isLocked -- Switches the mode (On <-> Off)
+    end
+end)
+
+-- Apply the mode every frame
+RunService.RenderStepped:Connect(function()
+    if isLocked then
+        -- Mode 1: Camera Locked (Look around)
+        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        UserInputService.MouseIconEnabled = false -- Hide cursor for better aim
+    else
+        -- Mode 2: Mouse Unlocked (Move cursor freely)
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
+    end
+end)
