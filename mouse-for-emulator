@@ -19,6 +19,5 @@ RunService.RenderStepped:Connect(function()
     else
         -- Mode 2: Mouse Unlocked (Move cursor freely)
         UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
     end
 end)
